@@ -39,7 +39,6 @@ std_string = """
 # load symbols so that python understand
 ffi.cdef(sys_types + fuse_cdef + std_string)
 
-
 # dynamic library or compile by cffi
 # currently both methods works.
 # maybe we can check the performance.
@@ -76,6 +75,10 @@ class FuseOSError(OSError):
     def __init__(self, errno):
         super(FuseOSError, self).__init__(errno, strerror(errno))
 
+
+def example_getattr(path, buf):
+    print 'yaya we are here'
+    return 0
 
 class FUSE(object):
     '''
@@ -119,15 +122,25 @@ class FUSE(object):
         args = [arg.encode(encoding) for arg in args]
         argv = [ffi.new("char[]", arg) for arg in args]
 
-
+		
         # setup the callback function
 		# the self argument will cause big problem
-        methods = [x for x in dir(self) if not "_" in x]
-        for method in methods:
-            if hasattr(fuse_ops, method):
-                cdef = ffi.typeof(getattr(fuse_ops, method)).cname
-                callback = ffi.callback(cdef, getattr(self, method))
-                setattr(fuse_ops, method, callback)
+        fuse_ops = ffi.new("struct fuse_operations*")
+        cdef = ffi.typeof(getattr(fuse_ops, 'getattr')).cname
+        callback = ffi.callback(cdef, getattr(self, 'getattr'))
+        setattr(fuse_ops, 'getattr', callback)
+
+        cdef = ffi.typeof(getattr(fuse_ops, 'readdir')).cname
+        callback1 = ffi.callback(cdef, getattr(self, 'readdir'))
+        setattr(fuse_ops, 'readdir', callback1)
+		
+
+        #methods = [x for x in dir(self) if not "_" in x]
+        #for method in methods:
+        #    if hasattr(fuse_ops, method):
+        #        cdef = ffi.typeof(getattr(fuse_ops, method)).cname
+        #        callback = ffi.callback(cdef, getattr(self, method))
+        #        setattr(fuse_ops, method, callback)
 
         try:
             old_handler = signal(SIGINT, SIG_DFL)
@@ -135,7 +148,7 @@ class FUSE(object):
             old_handler = SIG_DFL
 
         err = _libfuse.fuse_main_real(len(args), argv, fuse_ops,
-                                      ffi.sizeof(fuse_ops[0]), ffi.NULL)
+                                      ffi.sizeof("struct fuse_operations"), ffi.NULL)
 
         try:
             signal(SIGINT, old_handler)
@@ -154,22 +167,11 @@ class FUSE(object):
             else:
                 yield '%s=%s' % (key, value)
 
-    @staticmethod
-    def _wrapper(func, *args, **kwargs):
-        'Decorator for the methods that follow'
-
-        try:
-            return func(*args, **kwargs) or 0
-        except OSError, e:
-            return -(e.errno or EFAULT)
-        except:
-            print_exc()
-            return -EFAULT
-
     def getattr(self, path, buf):
         return self.fgetattr(path, buf, None)
     
     def readlink(self, path, buf, bufsize):
+        path = ffi.string(path)
         ret = self.operations('readlink', path.decode(self.encoding)) \
                   .encode(self.encoding)
 
@@ -346,18 +348,19 @@ class FUSE(object):
 
     def readdir(self, path, buf, filler, offset, fip):
         # Ignore raw_fi
+        path = ffi.string(path)
         for item in self.operations('readdir', path.decode(self.encoding),
-                                               fip.contents.fh):
+                                               fip.fh):
 
             if isinstance(item, basestring):
-                name, st, offset = item, None, 0
+                name, st, offset = item, ffi.NULL, 0
             else:
                 name, attrs, offset = item
                 if attrs:
-                    st = c_stat()
+                    st = ffi.new("struct stat*")
                     set_st_attrs(st, attrs)
                 else:
-                    st = None
+                    st = ffi.NULL
 
             if filler(buf, name.encode(self.encoding), st, offset) != 0:
                 break
@@ -403,18 +406,18 @@ class FUSE(object):
                                            length, fh)
 
     def fgetattr(self, path, buf, fip):
-        memset(buf, 0, sizeof(c_stat))
+        _libfuse.memset(buf, 0, ffi.sizeof("struct stat"))
 
-        st = buf.contents
         if not fip:
             fh = fip
         elif self.raw_fi:
             fh = fip.contents
         else:
             fh = fip.contents.fh
-
+        
+        path = ffi.string(path)
         attrs = self.operations('getattr', path.decode(self.encoding), fh)
-        set_st_attrs(st, attrs)
+        set_st_attrs(buf, attrs)
         return 0
 
     def lock(self, path, fip, cmd, lock):
@@ -633,4 +636,6 @@ class LoggingMixIn:
             raise
         finally:
             self.log.debug('<- %s %s', op, repr(ret))
+
+
 
