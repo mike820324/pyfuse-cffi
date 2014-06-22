@@ -1,5 +1,4 @@
 from cffi import FFI
-
 from stat import S_IFDIR, S_IFLNK, S_IFREG
 from signal import signal, SIGINT, SIG_DFL
 import logging
@@ -112,6 +111,7 @@ class FUSE(object):
                     if kwargs.pop(arg, False))
 
         kwargs.setdefault('fsname', operations.__class__.__name__)
+        args.append('-d')
         args.append('-o')
         args.append(','.join(self._normalize_fuse_options(**kwargs)))
         args.append(mountpoint)
@@ -121,13 +121,13 @@ class FUSE(object):
 
 
         # setup the callback function
-        fuse_ops = ffi.new("struct fuse_operations*")
+		# the self argument will cause big problem
         methods = [x for x in dir(self) if not "_" in x]
         for method in methods:
             if hasattr(fuse_ops, method):
-                callback = partial(self._wrapper, getattr(self, method))
-                c_callback = ffi.callback("int(int)", callback) 
-                setattr(fuse_ops, method, c_callback)
+                cdef = ffi.typeof(getattr(fuse_ops, method)).cname
+                callback = ffi.callback(cdef, getattr(self, method))
+                setattr(fuse_ops, method, callback)
 
         try:
             old_handler = signal(SIGINT, SIG_DFL)
@@ -135,7 +135,7 @@ class FUSE(object):
             old_handler = SIG_DFL
 
         err = _libfuse.fuse_main_real(len(args), argv, fuse_ops,
-                                      ffi.sizeof("struct fuse_operations"), ffi.NULL)
+                                      ffi.sizeof(fuse_ops[0]), ffi.NULL)
 
         try:
             signal(SIGINT, old_handler)
@@ -166,11 +166,9 @@ class FUSE(object):
             print_exc()
             return -EFAULT
 
-    @ffi.callback("int(const char *, int)")
     def getattr(self, path, buf):
         return self.fgetattr(path, buf, None)
     
-    @ffi.callback("int(const char*, char*, size_t)")
     def readlink(self, path, buf, bufsize):
         ret = self.operations('readlink', path.decode(self.encoding)) \
                   .encode(self.encoding)
@@ -181,46 +179,37 @@ class FUSE(object):
         memmove(buf, data, len(data))
         return 0
 
-    @ffi.callback("int(const char*, mode_t, dev_t)")
     def mknod(self, path, mode, dev):
         return self.operations('mknod', path.decode(self.encoding), mode, dev)
 
-    @ffi.callback("int(const char*, mode_t)")
     def mkdir(self, path, mode):
         return self.operations('mkdir', path.decode(self.encoding), mode)
 
-    @ffi.callback("int(const char*)")
     def unlink(self, path):
         return self.operations('unlink', path.decode(self.encoding))
 
-    @ffi.callback("int(const char*)")
     def rmdir(self, path):
         return self.operations('rmdir', path.decode(self.encoding))
 
-    @ffi.callback("int(const char*, const char*)")
     def symlink(self, source, target):
         'creates a symlink `target -> source` (e.g. ln -s source target)'
 
         return self.operations('symlink', target.decode(self.encoding),
                                           source.decode(self.encoding))
 
-    @ffi.callback("int(const char*, const char*)")
     def rename(self, old, new):
         return self.operations('rename', old.decode(self.encoding),
                                          new.decode(self.encoding))
 
-    @ffi.callback("int(const char*, const char*)")
     def link(self, source, target):
         'creates a hard link `target -> source` (e.g. ln source target)'
 
         return self.operations('link', target.decode(self.encoding),
                                        source.decode(self.encoding))
 
-    @ffi.callback("int(const char*, mode_t)")
     def chmod(self, path, mode):
         return self.operations('chmod', path.decode(self.encoding), mode)
 
-    @ffi.callback("int(const char*, uid_t, gid_t)")
     def chown(self, path, uid, gid):
         # Check if any of the arguments is a -1 that has overflowed
         if c_uid_t(uid + 1).value == 0:
@@ -230,11 +219,9 @@ class FUSE(object):
 
         return self.operations('chown', path.decode(self.encoding), uid, gid)
 
-    @ffi.callback("int(const char*, off_t)")
     def truncate(self, path, length):
         return self.operations('truncate', path.decode(self.encoding), length)
 
-    @ffi.callback("int(const char*, struct fuse_file_info*)")
     def open(self, path, fip):
         fi = fip.contents
         if self.raw_fi:
@@ -245,7 +232,6 @@ class FUSE(object):
 
             return 0
 
-    @ffi.callback("int(const char*, char*, size_t, off_t, struct fuse_file_info*)")
     def read(self, path, buf, size, offset, fip):
         if self.raw_fi:
           fh = fip.contents
@@ -265,8 +251,7 @@ class FUSE(object):
         memmove(buf, ret, retsize)
         return retsize
 
-    @ffi.callback("int(const char*, char*, size_t, off_t, struct fuse_file_info*)")
-    def write(self, path, buf, size, offset, fip):
+    def _write(self, path, buf, size, offset, fip):
         data = string_at(buf, size)
 
         if self.raw_fi:
@@ -277,7 +262,6 @@ class FUSE(object):
         return self.operations('write', path.decode(self.encoding), data,
                                         offset, fh)
 
-    @ffi.callback("int(const char*, struct statvfs *)")
     def statfs(self, path, buf):
         stv = buf.contents
         attrs = self.operations('statfs', path.decode(self.encoding))
@@ -287,7 +271,6 @@ class FUSE(object):
 
         return 0
 
-    @ffi.callback("int(const char*, struct fuse_file_info *)")
     def flush(self, path, fip):
         if self.raw_fi:
             fh = fip.contents
@@ -296,7 +279,6 @@ class FUSE(object):
 
         return self.operations('flush', path.decode(self.encoding), fh)
 
-    @ffi.callback("int(const char*, struct fuse_file_info *)")
     def release(self, path, fip):
         if self.raw_fi:
           fh = fip.contents
@@ -305,7 +287,6 @@ class FUSE(object):
 
         return self.operations('release', path.decode(self.encoding), fh)
 
-    @ffi.callback("int(const char*, int, struct fuse_file_info *)")
     def fsync(self, path, datasync, fip):
         if self.raw_fi:
             fh = fip.contents
@@ -315,13 +296,11 @@ class FUSE(object):
         return self.operations('fsync', path.decode(self.encoding), datasync,
                                         fh)
 
-    @ffi.callback("int(const char *, const char *, const char*, size_t, int)")
-    def setxattr(self, path, name, value, size, options, *args):
+    def _setxattr(self, path, name, value, size, options, *args):
         return self.operations('setxattr', path.decode(self.encoding),
                                name.decode(self.encoding),
                                string_at(value, size), options, *args)
 
-    @ffi.callback("int(const char*, const char*, char*, size_t)")
     def getxattr(self, path, name, value, size, *args):
         ret = self.operations('getxattr', path.decode(self.encoding),
                                           name.decode(self.encoding), *args)
@@ -338,7 +317,6 @@ class FUSE(object):
 
         return retsize
 
-    @ffi.callback("int(const char*, char*, size_t)")
     def listxattr(self, path, namebuf, size):
         attrs = self.operations('listxattr', path.decode(self.encoding)) or ''
         ret = '\x00'.join(attrs).encode(self.encoding) + '\x00'
@@ -355,12 +333,10 @@ class FUSE(object):
 
         return retsize
 
-    @ffi.callback("int(const char*, char*)")
     def removexattr(self, path, name):
         return self.operations('removexattr', path.decode(self.encoding),
                                               name.decode(self.encoding))
 
-    @ffi.callback("int(const char*, struct fuse_file_info*)")
     def opendir(self, path, fip):
         # Ignore raw_fi
         fip.contents.fh = self.operations('opendir',
@@ -368,7 +344,6 @@ class FUSE(object):
 
         return 0
 
-    #@ffi.callback("int(const char*, void *, fuse_fill_dir_t, off_t, struct fuse_file_info*)")
     def readdir(self, path, buf, filler, offset, fip):
         # Ignore raw_fi
         for item in self.operations('readdir', path.decode(self.encoding),
@@ -389,31 +364,25 @@ class FUSE(object):
 
         return 0
 
-    @ffi.callback("int(const char*, struct fuse_file_info*)")
     def releasedir(self, path, fip):
         # Ignore raw_fi
         return self.operations('releasedir', path.decode(self.encoding),
                                              fip.contents.fh)
 
-    @ffi.callback("int(const char*, int, struct fuse_file_info*)")
     def fsyncdir(self, path, datasync, fip):
         # Ignore raw_fi
         return self.operations('fsyncdir', path.decode(self.encoding),
                                            datasync, fip.contents.fh)
 
-    @ffi.callback("void *(struct fuse_conn_info *conn)")
     def init(self, conn):
         return self.operations('init', '/')
 
-    @ffi.callback("void(void*)")
     def destroy(self, private_data):
         return self.operations('destroy', '/')
     
-    @ffi.callback("int(const char*, int)")
     def access(self, path, amode):
         return self.operations('access', path.decode(self.encoding), amode)
 
-    @ffi.callback("int(const char*, mode_t, struct fuse_file_info*)")
     def create(self, path, mode, fip):
         fi = fip.contents
         path = path.decode(self.encoding)
@@ -424,7 +393,6 @@ class FUSE(object):
             fi.fh = self.operations('create', path, mode)
             return 0
     
-    @ffi.callback("int(const char*, off_t, struct fuse_file_info*)")
     def ftruncate(self, path, length, fip):
         if self.raw_fi:
             fh = fip.contents
@@ -434,7 +402,6 @@ class FUSE(object):
         return self.operations('truncate', path.decode(self.encoding),
                                            length, fh)
 
-    @ffi.callback("int(const char*, struct stat *, struct fuse_file_info*)")
     def fgetattr(self, path, buf, fip):
         memset(buf, 0, sizeof(c_stat))
 
@@ -450,7 +417,6 @@ class FUSE(object):
         set_st_attrs(st, attrs)
         return 0
 
-    @ffi.callback("int(const char*, struct fuse_file_info*, int, struct flock* )")
     def lock(self, path, fip, cmd, lock):
         if self.raw_fi:
             fh = fip.contents
@@ -460,18 +426,16 @@ class FUSE(object):
         return self.operations('lock', path.decode(self.encoding), fh, cmd,
                                        lock)
 
-    @ffi.callback("int(const char *, const struct timespec tv[2])")
-    def utimens(self, path, buf):
+    def _utimens(self, path, buf):
         if buf:
-            atime = time_of_timespec(buf.contents.actime)
-            mtime = time_of_timespec(buf.contents.modtime)
+            atime = time_of_timespec(buf.actime)
+            mtime = time_of_timespec(buf.modtime)
             times = (atime, mtime)
         else:
             times = None
 
         return self.operations('utimens', path.decode(self.encoding), times)
 
-    @ffi.callback("int(const char *, size_t blocksize, uint64_t *idx)")
     def bmap(self, path, blocksize, idx):
         return self.operations('bmap', path.decode(self.encoding), blocksize,
                                        idx)
